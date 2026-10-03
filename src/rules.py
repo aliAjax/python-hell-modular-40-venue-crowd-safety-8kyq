@@ -27,6 +27,54 @@ def capacity_available(capacity, occupancy, requested):
     return int(occupancy) + int(requested) <= int(capacity)
 
 
+# 额度账常量：进场口未限流时视为不限量。
+QUOTA_UNLIMITED = 2**62 - 1
+
+# 未结案事件按严重度在所属区域预留的处置缓冲（占区域容量比例）。
+INCIDENT_HOLD_RATIO = {"low": 0.0, "medium": 0.05, "high": 0.10, "critical": 0.20}
+ACTIVE_INCIDENT_STATUSES = ("reported", "triaged", "dispatched", "reopened")
+
+
+def zone_quota_limit(zone, active_incidents=()):
+    """区域额度上限：按区域状态取基准，再减去未结案事件的处置预留。"""
+    capacity = int(zone["data"].get("capacity", 0))
+    status = zone["status"]
+    if status in ("closed", "evacuating"):
+        base = 0
+    elif status == "limited":
+        base = min(capacity, int(zone["data"].get("admit_limit", capacity)))
+    else:
+        base = capacity
+    hold = 0
+    for incident in active_incidents:
+        ratio = INCIDENT_HOLD_RATIO.get(incident["data"].get("severity"), 0.0)
+        hold += int(capacity * ratio)
+    return max(0, base - hold)
+
+
+def venue_quota_limit(venue, zones=()):
+    """场馆总额度上限：限流用capacity_limit，否则用total_capacity或各区域容量之和。"""
+    status = venue["status"]
+    if status == "closed":
+        return 0
+    if status == "limited":
+        return int(venue["data"].get("capacity_limit", 0))
+    total = venue["data"].get("total_capacity")
+    if total is not None:
+        return int(total)
+    return sum(int(zone["data"].get("capacity", 0)) for zone in zones)
+
+
+def gate_quota_limit(gate):
+    """进场口放行上限：限流用flow_limit，开放不限量，关闭为0。"""
+    status = gate["status"]
+    if status == "closed":
+        return 0
+    if status == "restricted":
+        return int(gate["data"].get("flow_limit", 0))
+    return QUOTA_UNLIMITED
+
+
 def _validate_venue(actor, data, lookup):
     if not str(data.get("name", "")).strip():
         raise ValidationError("venue name is required")
@@ -103,20 +151,12 @@ def _validate_zone_admit(actor, entity, data, lookup):
     if count <= 0:
         raise ValidationError("admission count must be positive")
     gate = _find_one(lookup, "gate", "id", data.get("gate_id"))
-    if not gate or gate["status"] != "open":
+    if not gate or gate["status"] not in ("open", "restricted"):
         raise ConflictError("entry gate is not open")
     if entity["id"] not in (gate["data"].get("zone_ids") or []):
         raise ValidationError("gate does not serve this zone")
-    occupancy = int(entity["data"].get("current_occupancy", 0))
-    capacity = int(entity["data"].get("capacity", 0))
-    if not capacity_available(capacity, occupancy, count):
-        raise ConflictError("zone capacity would be exceeded")
-    if entity["status"] == "limited":
-        limit = int(entity["data"].get("admit_limit", capacity))
-        if occupancy + count > limit:
-            raise ConflictError("zone admission limit would be exceeded")
+    # 容量不再在这里扣：区域余量、场馆总容量、进场口放行上限由额度账原子扣减。
     return {
-        "current_occupancy": occupancy + count,
         "last_admission_at": data.get("admitted_at"),
         "last_gate_id": gate["id"],
     }

@@ -84,6 +84,19 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "quotas"]:
+                    return self._send(200, {"items": service.quota_accounts()})
+                if parts == ["api", "ledger"]:
+                    query = parse_qs(parsed.query)
+                    return self._send(
+                        200,
+                        {
+                            "items": service.quota_ledger(
+                                account_id=query.get("account_id", [None])[0],
+                                batch_id=query.get("batch_id", [None])[0],
+                            )
+                        },
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -103,40 +116,35 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+
+                def _action(entity_id):
+                    body = self._body()
+                    action = body.pop("action", None)
+                    if not action:
+                        raise ValidationError("action is required")
+                    data = body.pop("data", body)
+                    idem_key = self.headers.get("Idempotency-Key")
+                    if idem_key and isinstance(data, dict) and "idempotency_key" not in data:
+                        data["idempotency_key"] = idem_key
+                    return self._send(
+                        200,
+                        service.transition(
+                            actor, entity_id, action, data, body.pop("expected_version", None)
+                        ),
+                    )
+
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
-                    body = self._body()
-                    action = body.pop("action", None)
-                    if not action:
-                        raise ValidationError("action is required")
-                    return self._send(
-                        200,
-                        service.transition(
-                            actor,
-                            parts[2],
-                            action,
-                            body.pop("data", body),
-                            body.pop("expected_version", None),
-                        ),
-                    )
+                    return _action(parts[2])
                 if len(parts) == 4 and parts[0] == "api" and parts[3] == "actions":
-                    body = self._body()
-                    action = body.pop("action", None)
-                    if not action:
-                        raise ValidationError("action is required")
-                    return self._send(
-                        200,
-                        service.transition(
-                            actor,
-                            parts[2],
-                            action,
-                            body.pop("data", body),
-                            body.pop("expected_version", None),
-                        ),
-                    )
+                    return _action(parts[2])
                 if len(parts) == 5 and parts[0] == "api" and parts[4] == "actions":
+                    body = self._body()
+                    idem_key = self.headers.get("Idempotency-Key")
+                    if idem_key and "idempotency_key" not in body:
+                        body["idempotency_key"] = idem_key
                     return self._send(
                         200,
-                        service.transition(actor, parts[2], parts[3], self._body(), None),
+                        service.transition(actor, parts[2], parts[3], body, None),
                     )
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()

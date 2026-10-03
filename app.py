@@ -18,6 +18,8 @@ def main(argv=None):
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    # 旧数据升级：按现有占用回填初始额度，保证总账对上。
+    service.migrate_quotas()
     server = create_server(
         args.host,
         args.port,
