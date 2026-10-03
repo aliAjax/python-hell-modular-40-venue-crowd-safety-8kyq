@@ -84,6 +84,10 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "quotas"]:
+                    query = parse_qs(parsed.query)
+                    venue_id = query.get("venue_id", [None])[0]
+                    return self._send(200, service.quota_overview(venue_id))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -103,6 +107,10 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if len(parts) == 3 and parts[:2] == ["api", "quotas"]:
+                    if parts[2] == "backfill":
+                        return self._send(200, service.backfill_quotas())
+                    raise ValidationError("unknown quotas action")
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)
@@ -116,6 +124,7 @@ def create_handler(service, rules, static_dir):
                             action,
                             body.pop("data", body),
                             body.pop("expected_version", None),
+                            self.headers.get("Idempotency-Key"),
                         ),
                     )
                 if len(parts) == 4 and parts[0] == "api" and parts[3] == "actions":
@@ -131,12 +140,20 @@ def create_handler(service, rules, static_dir):
                             action,
                             body.pop("data", body),
                             body.pop("expected_version", None),
+                            self.headers.get("Idempotency-Key"),
                         ),
                     )
                 if len(parts) == 5 and parts[0] == "api" and parts[4] == "actions":
                     return self._send(
                         200,
-                        service.transition(actor, parts[2], parts[3], self._body(), None),
+                        service.transition(
+                            actor,
+                            parts[2],
+                            parts[3],
+                            self._body(),
+                            None,
+                            self.headers.get("Idempotency-Key"),
+                        ),
                     )
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()
